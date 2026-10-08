@@ -1,0 +1,10 @@
+groq
+python-dotenv
+requests
+keyboard
+sounddevice
+soundfile
+numpy
+pygame-ce
+fastapi[all]
+psycopg2-binary

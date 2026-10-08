@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import { MessageSquare, Plus, Mic, Send, CircleDot, Trash2, X, Activity } from 'lucide-react';
+import { MessageSquare, Plus, Mic, Send, CircleDot, Trash2, X, Activity, AudioLines } from 'lucide-react';
 import './App.css';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
@@ -386,7 +386,7 @@ function App() {
         <div className="brand">J A R V I S</div>
         <div className="top-controls">
           <button className="enter-voice-btn" onClick={() => setIsVoiceMode(true)}>
-            <Mic size={16} /> Voice Mode
+            <Mic size={16} /> Voice Chat
           </button>
           <div className="status">
             <CircleDot size={14} color="#00e676" />
@@ -478,6 +478,13 @@ function App() {
                 disabled={!input.trim() || audioState === 'PROCESSING' || audioState === 'SPEAKING'}
               >
                 <Send size={20} />
+              </button>
+              <button 
+                className="chatgpt-voice-btn"
+                onClick={() => setIsVoiceMode(true)}
+                title="Voice Chat"
+              >
+                <AudioLines size={18} color="#ffffff" />
               </button>
             </div>
           </div>

@@ -267,6 +267,27 @@
   cursor: not-allowed;
 }
 
+.chatgpt-voice-btn {
+  background-color: #2b7af0; /* ChatGPT Blue */
+  color: white;
+  border: none;
+  border-radius: 50%;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  margin-left: 8px;
+  box-shadow: 0 0 10px rgba(0,0,0,0.2);
+}
+
+.chatgpt-voice-btn:hover {
+  background-color: #3b8cf5;
+  transform: scale(1.05);
+}
+
 textarea {
   flex: 1;
   background: transparent;

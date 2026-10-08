@@ -13,7 +13,7 @@ app = FastAPI(title="JARVIS Backend API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+       allow_origins=["https://mini-jarvis-ebon.vercel.app/"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

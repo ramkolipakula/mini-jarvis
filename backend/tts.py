@@ -4,8 +4,11 @@ os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide"
 import pygame
 from config import TTS_API_KEY, OUTPUT_AUDIO_FILE
 
-# Initialize pygame mixer for audio playback
-pygame.mixer.init()
+# Initialize pygame mixer for audio playback (will fail silently on headless servers like Render)
+try:
+    pygame.mixer.init()
+except pygame.error:
+    print("[Warning: Audio device not found. Local speaker output disabled.]")
 
 def speak(text):
     """

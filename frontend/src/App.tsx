@@ -354,7 +354,7 @@ function App() {
 
   const handleSend = (textToSend?: string) => {
     const text = (textToSend || inputValue).trim();
-    if (!text || isThinking || isTranscribing) return;
+    if (!text || isThinking || (!textToSend && isTranscribing)) return;
 
     if (!hasUserMessages) {
       setFirstSendBrighten(true);
@@ -390,8 +390,11 @@ function App() {
 
         const { blob, durationMs, peakLevel } = result;
 
-        // GUARD 1: If recording is shorter than 0.8s, or peak level stayed below threshold (silent/empty), do not send
-        if (durationMs < 800 || peakLevel < 0.04 || blob.size < 1500) {
+        console.log(`[VOICE DIAGNOSTIC] Stopped recording in ${mode.toUpperCase()} mode: duration=${durationMs.toFixed(0)}ms, peakLevel=${peakLevel.toFixed(3)}, blobSize=${blob.size} bytes`);
+
+        // GUARD 1: Only reject if recording is truly empty or micro-click (< 300ms or < 400 bytes)
+        if (durationMs < 300 || blob.size < 400) {
+          console.warn('[VOICE DIAGNOSTIC] Recording was empty or too brief - suppressing chat submission');
           const promptMsg = "I didn't hear anything. Try again?";
           showToast(promptMsg);
           setVoiceTranscript(promptMsg);
@@ -416,17 +419,29 @@ function App() {
 
         setIsTranscribing(false);
 
-        // GUARD 2: Whisper hallucination guard
-        // If transcript is "Thank you." or "Thanks for watching." and peak level was low, treat as empty
+        console.log(`[VOICE DIAGNOSTIC] STT transcript returned: "${transcriptText}"`);
+
+        // GUARD 2: Whisper silence and hallucination guard
+        // When audio is pure silence or low background noise, Whisper commonly hallucinates phantom phrases:
         const normalized = transcriptText.toLowerCase().replace(/[.,!?;:]+$/, '').trim();
+        const SILENCE_HALLUCINATIONS = [
+          'thank you',
+          'thanks for watching',
+          'thank you for watching',
+          'thanks',
+          'you mind it',
+          'you',
+          'bye',
+          'subtitles by',
+          'please subscribe',
+          'amara.org',
+        ];
         const isHallucination =
-          (normalized === 'thank you' ||
-            normalized === 'thanks for watching' ||
-            normalized === 'thank you for watching' ||
-            normalized === 'thanks') &&
-          peakLevel < 0.14;
+          SILENCE_HALLUCINATIONS.includes(normalized) ||
+          normalized.startsWith('subtitles by');
 
         if (!transcriptText || isHallucination) {
+          console.warn(`[VOICE DIAGNOSTIC] Suppressed silence/hallucination text ("${transcriptText}") - prompting retry`);
           const promptMsg = "I didn't hear anything. Try again?";
           showToast(promptMsg);
           setVoiceTranscript(promptMsg);
@@ -436,6 +451,7 @@ function App() {
           return;
         }
 
+        console.log(`[VOICE DIAGNOSTIC] Submitting finalized transcript to JARVIS: "${transcriptText}"`);
         setVoiceTranscript(transcriptText);
 
         if (mode === 'chat') {
@@ -447,6 +463,7 @@ function App() {
       } else {
         setVoiceError(null);
         setVoiceTranscript('');
+        console.log(`[VOICE DIAGNOSTIC] Starting microphone capture in ${mode.toUpperCase()} mode...`);
         await audioEngine.startRecording();
       }
     } catch (err: any) {
@@ -475,11 +492,21 @@ function App() {
         setIsTranscribing(false);
         const cleanText = (res.text || '').trim();
         const normalized = cleanText.toLowerCase().replace(/[.,!?;:]+$/, '').trim();
+        const SILENCE_HALLUCINATIONS = [
+          'thank you',
+          'thanks for watching',
+          'thank you for watching',
+          'thanks',
+          'you mind it',
+          'you',
+          'bye',
+          'subtitles by',
+          'please subscribe',
+          'amara.org',
+        ];
         const isHallucination =
-          normalized === 'thank you' ||
-          normalized === 'thanks for watching' ||
-          normalized === 'thank you for watching' ||
-          normalized === 'thanks';
+          SILENCE_HALLUCINATIONS.includes(normalized) ||
+          normalized.startsWith('subtitles by');
 
         if (cleanText && !isHallucination) {
           setVoiceTranscript(cleanText);
@@ -518,12 +545,12 @@ function App() {
     showToast(`Switched to ${newMode.toUpperCase()} mode`);
   };
 
-  // Pre-warm microphone stream if starting in Voice mode
+  // Pre-warm microphone permission when switching to or starting in Voice mode
   useEffect(() => {
     if (mode === 'voice') {
       audioEngine.warmStream();
     }
-  }, [mode, audioEngine]);
+  }, [mode]); // Stable dependency: only triggers on mode transition
 
   const handleSpeak = (text: string, audio?: string | null) => {
     if (audio) {

@@ -11,9 +11,18 @@ from config import GROQ_API_KEY
 
 app = FastAPI(title="JARVIS Backend API")
 
+# Allow origins from environment variable, specific Vercel app, or any *.vercel.app domain
+cors_env = os.getenv("CORS_ORIGINS", "")
+explicit_origins = [o.strip() for o in cors_env.split(",") if o.strip()] if cors_env else [
+    "https://mini-jarvis-ebon.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:3000",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://mini-jarvis-ebon.vercel.app"],
+    allow_origins=explicit_origins,
+    allow_origin_regex=r"^https://.*\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

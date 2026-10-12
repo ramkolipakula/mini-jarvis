@@ -47,11 +47,28 @@ def generate_response(user_text, conversation_id=None):
         response = client.chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=messages,
-            max_tokens=200,
+            max_tokens=1024,
             temperature=0.6
         )
         
-        jarvis_text = response.choices[0].message.content.strip()
+        jarvis_text = (response.choices[0].message.content or "").strip()
+        jarvis_text = jarvis_text.replace('\u202f', ' ').replace('\u00a0', ' ').replace('\u2011', '-')
+        
+        # If reasoning model ran out of tokens or returned empty, query fast fallback
+        if not jarvis_text:
+            try:
+                fallback_resp = client.chat.completions.create(
+                    model="qwen/qwen3.8-27b",
+                    messages=messages,
+                    max_tokens=300,
+                    temperature=0.6
+                )
+                jarvis_text = (fallback_resp.choices[0].message.content or "").strip()
+            except Exception:
+                pass
+                
+        if not jarvis_text:
+            jarvis_text = "I am online and standing by. How can I assist you?"
         
         if conversation_id:
             # Save assistant response to DB

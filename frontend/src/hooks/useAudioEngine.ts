@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
 import { formatFriendlyError, type FormattedError } from '@/lib/api';
 
 export interface RecordingResult {
@@ -38,10 +38,16 @@ export function useAudioEngine(options?: UseAudioEngineOptions): UseAudioEngineR
 
   const energyRef = useRef<number>(0);
 
-  // Web Audio Context & Analyser
+  // Web Audio Context & Analysers
   const audioContextRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
+  const micAnalyserRef = useRef<AnalyserNode | null>(null);
+  const playbackAnalyserRef = useRef<AnalyserNode | null>(null);
+  const isSpeakingRef = useRef<boolean>(false);
   const rafIdRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    isSpeakingRef.current = isSpeaking;
+  }, [isSpeaking]);
 
   // Microphone state & guards
   const micStreamRef = useRef<MediaStream | null>(null);
@@ -87,12 +93,32 @@ export function useAudioEngine(options?: UseAudioEngineOptions): UseAudioEngineR
       if (!AudioCtxClass) return null;
 
       const ctx = new AudioCtxClass();
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 256;
-      analyser.smoothingTimeConstant = 0.8;
+
+      // Microphone analyser: strictly for measuring input levels and orb animation.
+      // CRITICAL: NEVER connect micAnalyser to ctx.destination!
+      // Connecting mic to destination routes user's microphone directly into speakers (echo & hearing yourself).
+      const micAnalyser = ctx.createAnalyser();
+      micAnalyser.fftSize = 256;
+      micAnalyser.smoothingTimeConstant = 0.8;
+      try {
+        micAnalyser.disconnect();
+      } catch {}
+      micAnalyserRef.current = micAnalyser;
+
+      // Playback analyser: strictly for assistant TTS audio playback.
+      // Connects to ctx.destination so assistant responses are heard through speakers.
+      const playbackAnalyser = ctx.createAnalyser();
+      playbackAnalyser.fftSize = 256;
+      playbackAnalyser.smoothingTimeConstant = 0.8;
+      playbackAnalyser.connect(ctx.destination);
+      playbackAnalyserRef.current = playbackAnalyser;
 
       audioContextRef.current = ctx;
-      analyserRef.current = analyser;
+    } else {
+      // If audioContext already existed, guarantee micAnalyser has NO output connection to destination
+      try {
+        micAnalyserRef.current?.disconnect();
+      } catch {}
     }
 
     if (audioContextRef.current.state === 'suspended') {
@@ -103,17 +129,16 @@ export function useAudioEngine(options?: UseAudioEngineOptions): UseAudioEngineR
       }
     }
 
-    // Attach HTMLAudioElement once
+    // Attach HTMLAudioElement once to playback analyser
     if (!audioElRef.current) {
       const audioEl = new Audio();
       audioEl.crossOrigin = 'anonymous';
       audioElRef.current = audioEl;
 
-      if (!mediaElementSourceRef.current && audioContextRef.current && analyserRef.current) {
+      if (!mediaElementSourceRef.current && audioContextRef.current && playbackAnalyserRef.current) {
         try {
           const source = audioContextRef.current.createMediaElementSource(audioEl);
-          source.connect(analyserRef.current);
-          analyserRef.current.connect(audioContextRef.current.destination);
+          source.connect(playbackAnalyserRef.current);
           mediaElementSourceRef.current = source;
         } catch (e) {
           console.warn('Could not create MediaElementSource:', e);
@@ -124,7 +149,7 @@ export function useAudioEngine(options?: UseAudioEngineOptions): UseAudioEngineR
     return audioContextRef.current;
   }, []);
 
-  // Pre-warmed microphone stream: opened once and kept alive with track.enabled
+  // Microphone stream factory: ensures AudioContext and live MediaStream
   const getOrCreateStream = useCallback(async (): Promise<MediaStream> => {
     if (micStreamRef.current) {
       const tracks = micStreamRef.current.getAudioTracks();
@@ -135,59 +160,65 @@ export function useAudioEngine(options?: UseAudioEngineOptions): UseAudioEngineR
 
     await ensureAudioContext();
 
-    // Specific constraints: echoCancellation: true, noiseSuppression: false, autoGainControl: false, mono (channelCount: 1)
+    // Standard high-quality speech constraints: echo cancellation, noise suppression, AGC, mono
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
-        noiseSuppression: false,
-        autoGainControl: false,
+        noiseSuppression: true,
+        autoGainControl: true,
         channelCount: 1,
       },
     });
 
     micStreamRef.current = stream;
 
-    // Connect mic to analyser for visualizer and energy/peak measurements
-    if (audioContextRef.current && analyserRef.current) {
+    // Connect mic to micAnalyser ONLY — NEVER to destination or playbackAnalyser!
+    if (audioContextRef.current && micAnalyserRef.current) {
       if (micSourceRef.current) {
         try {
           micSourceRef.current.disconnect();
         } catch {}
       }
       const micSource = audioContextRef.current.createMediaStreamSource(stream);
-      micSource.connect(analyserRef.current);
+      micSource.connect(micAnalyserRef.current);
       micSourceRef.current = micSource;
     }
 
     const deviceLabel = stream.getAudioTracks()[0]?.label || 'Default microphone';
     console.log(
-      `[VOICE] Microphone stream acquired (${deviceLabel}), mono, echoCancellation=true, noiseSuppression=false, AGC=false`
+      `[VOICE] Microphone stream acquired (${deviceLabel}), mono, echoCancellation=true, noiseSuppression=true, AGC=true`
     );
 
     return stream;
   }, [ensureAudioContext]);
 
-  // Warm stream on demand (e.g. entering Voice mode or on initial render)
+  // Warm stream on demand (e.g. entering Voice mode or on initial render).
+  // Verifies/requests microphone permission upfront without keeping a muted track alive or interfering with active recordings.
   const warmStream = useCallback(async () => {
     if (!micSupported) return;
-    try {
-      const stream = await getOrCreateStream();
-      // Keep tracks disabled between recordings so no audio leaks
-      stream.getAudioTracks().forEach((track) => {
-        track.enabled = false;
-      });
-      console.log('[VOICE] Stream pre-warmed and ready');
-    } catch (err) {
-      console.warn('[VOICE] Pre-warming stream deferred to user tap:', err);
+    // CRITICAL: Never touch or mute stream if currently listening or recording
+    if (isListening || (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording')) {
+      return;
     }
-  }, [micSupported, getOrCreateStream]);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Immediately release permission-check stream so privacy indicator is not held open
+      stream.getTracks().forEach((track) => track.stop());
+      console.log('[VOICE] Microphone permission verified & pre-warmed');
+    } catch (err) {
+      console.warn('[VOICE] Pre-warming mic permission deferred to user tap:', err);
+    }
+  }, [micSupported, isListening]);
 
   // Visualizer loop for energyRef (used by AIOrb & SiriWave) and peak/average detection
   const startVisualizer = useCallback(() => {
     if (rafIdRef.current) return;
 
     const tick = () => {
-      const analyser = analyserRef.current;
+      const analyser = isSpeakingRef.current
+        ? playbackAnalyserRef.current
+        : micAnalyserRef.current;
+
       if (analyser) {
         const buffer = new Uint8Array(analyser.frequencyBinCount);
         analyser.getByteFrequencyData(buffer);
@@ -280,11 +311,18 @@ export function useAudioEngine(options?: UseAudioEngineOptions): UseAudioEngineR
     }
     mediaRecorderRef.current = null;
 
-    // Between sessions: mute track to preserve privacy, keep stream alive
+    // Release microphone tracks cleanly
     if (micStreamRef.current) {
-      micStreamRef.current.getAudioTracks().forEach((track) => {
-        track.enabled = false;
-      });
+      try {
+        micStreamRef.current.getTracks().forEach((track) => track.stop());
+      } catch {}
+      micStreamRef.current = null;
+    }
+    if (micSourceRef.current) {
+      try {
+        micSourceRef.current.disconnect();
+      } catch {}
+      micSourceRef.current = null;
     }
 
     if (audioElRef.current) {
@@ -317,9 +355,16 @@ export function useAudioEngine(options?: UseAudioEngineOptions): UseAudioEngineR
       const recorder = mediaRecorderRef.current;
       if (!recorder || recorder.state === 'inactive') {
         if (micStreamRef.current) {
-          micStreamRef.current.getAudioTracks().forEach((track) => {
-            track.enabled = false;
-          });
+          try {
+            micStreamRef.current.getTracks().forEach((track) => track.stop());
+          } catch {}
+          micStreamRef.current = null;
+        }
+        if (micSourceRef.current) {
+          try {
+            micSourceRef.current.disconnect();
+          } catch {}
+          micSourceRef.current = null;
         }
         setIsListening(false);
         stopVisualizer();
@@ -328,15 +373,10 @@ export function useAudioEngine(options?: UseAudioEngineOptions): UseAudioEngineR
         return;
       }
 
-      // TAIL: Keep recording ~500ms after the stop tap, so the end of the sentence is not cut off
+      // TAIL: Brief 120ms settling buffer to catch the final phoneme without awkward lag
       setTimeout(() => {
         try {
           if (recorder.state === 'recording') {
-            // Request any pending data to guarantee final chunk is in recordedChunks
-            try {
-              recorder.requestData();
-            } catch {}
-
             stopResolverRef.current = (res: RecordingResult | null) => {
               isStoppingRef.current = false;
               resolve(res);
@@ -351,7 +391,7 @@ export function useAudioEngine(options?: UseAudioEngineOptions): UseAudioEngineR
           isStoppingRef.current = false;
           resolve(null);
         }
-      }, 500);
+      }, 120);
     });
   }, [stopVisualizer]);
 
@@ -371,7 +411,7 @@ export function useAudioEngine(options?: UseAudioEngineOptions): UseAudioEngineR
     try {
       const stream = await getOrCreateStream();
 
-      // Enable track immediately from pre-warmed stream
+      // Ensure all tracks are enabled and live
       stream.getAudioTracks().forEach((track) => {
         track.enabled = true;
       });
@@ -404,6 +444,12 @@ export function useAudioEngine(options?: UseAudioEngineOptions): UseAudioEngineR
       recordingStartTimeRef.current = performance.now();
       isStoppingRef.current = false;
 
+      const recordingStartIso = new Date().toISOString();
+      console.log(`[VOICE DIAGNOSTIC] Recording started at ${recordingStartIso}:
+        - Track: ${liveTrack.label} (enabled=${liveTrack.enabled}, readyState=${liveTrack.readyState})
+        - Selected MIME type: ${mimeType || 'browser default'}
+        - Recorder state: ${recorder.state}`);
+
       recorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) {
           recordedChunksRef.current.push(e.data);
@@ -411,16 +457,24 @@ export function useAudioEngine(options?: UseAudioEngineOptions): UseAudioEngineR
       };
 
       recorder.onstop = () => {
-        // Between recordings: mute track to preserve privacy, keep stream alive
+        const recordingStopIso = new Date().toISOString();
+        // Release hardware microphone tracks cleanly when recording completes
         if (micStreamRef.current) {
-          micStreamRef.current.getAudioTracks().forEach((track) => {
-            track.enabled = false;
-          });
+          try {
+            micStreamRef.current.getTracks().forEach((track) => track.stop());
+          } catch {}
+          micStreamRef.current = null;
+        }
+        if (micSourceRef.current) {
+          try {
+            micSourceRef.current.disconnect();
+          } catch {}
+          micSourceRef.current = null;
         }
         setIsListening(false);
         stopVisualizer();
 
-        const blobType = recorder.mimeType || 'audio/webm';
+        const blobType = recorder.mimeType || mimeType || 'audio/webm';
         const finalBlob = new Blob(recordedChunksRef.current, { type: blobType });
 
         const durationMs = performance.now() - recordingStartTimeRef.current;
@@ -429,16 +483,18 @@ export function useAudioEngine(options?: UseAudioEngineOptions): UseAudioEngineR
           totalEnergyCountRef.current > 0
             ? totalEnergySumRef.current / totalEnergyCountRef.current
             : 0;
-        const deviceLabel = micStreamRef.current?.getAudioTracks()[0]?.label || 'Default microphone';
+        const deviceLabel = liveTrack.label || 'Default microphone';
 
-        // Log blob size and duration
-        console.log(
-          `[VOICE] Recorded blob built: ${(finalBlob.size / 1024).toFixed(1)} KB, ${(
-            durationMs / 1000
-          ).toFixed(2)}s, peak: ${peakLevel.toFixed(3)}, avg: ${avgLevel.toFixed(3)}`
-        );
+        console.log(`[VOICE DIAGNOSTIC] Recording stopped at ${recordingStopIso}:
+          - Duration: ${(durationMs / 1000).toFixed(2)}s (${durationMs.toFixed(0)}ms)
+          - Chunks collected: ${recordedChunksRef.current.length}
+          - Blob size: ${(finalBlob.size / 1024).toFixed(1)} KB (${finalBlob.size} bytes)
+          - Blob type: ${blobType}
+          - Peak level: ${peakLevel.toFixed(3)}
+          - Avg level: ${avgLevel.toFixed(3)}
+          - Microphone tracks released: true`);
 
-        // Debug mode handling: play back exact blob and log telemetry
+        // Telemetry logging
         if (isDebugAudio()) {
           console.log(`[VOICE] Device: ${deviceLabel}`);
           console.log(
@@ -449,14 +505,6 @@ export function useAudioEngine(options?: UseAudioEngineOptions): UseAudioEngineR
           console.log(
             `[VOICE] Peak level: ${peakLevel.toFixed(3)} | Avg level: ${avgLevel.toFixed(3)}`
           );
-          try {
-            const url = URL.createObjectURL(finalBlob);
-            const debugAudio = new Audio(url);
-            debugAudio.onended = () => URL.revokeObjectURL(url);
-            debugAudio.play().catch((err) => console.warn('[VOICE] Playback error:', err));
-          } catch (e) {
-            console.warn('[VOICE] Playback error:', e);
-          }
         }
 
         if (stopResolverRef.current) {
@@ -493,9 +541,16 @@ export function useAudioEngine(options?: UseAudioEngineOptions): UseAudioEngineR
       }, 20000);
     } catch (err: any) {
       if (micStreamRef.current) {
-        micStreamRef.current.getAudioTracks().forEach((track) => {
-          track.enabled = false;
-        });
+        try {
+          micStreamRef.current.getTracks().forEach((track) => track.stop());
+        } catch {}
+        micStreamRef.current = null;
+      }
+      if (micSourceRef.current) {
+        try {
+          micSourceRef.current.disconnect();
+        } catch {}
+        micSourceRef.current = null;
       }
       setIsListening(false);
       stopVisualizer();
@@ -527,9 +582,16 @@ export function useAudioEngine(options?: UseAudioEngineOptions): UseAudioEngineR
       } catch {}
     }
     if (micStreamRef.current) {
-      micStreamRef.current.getAudioTracks().forEach((track) => {
-        track.enabled = false;
-      });
+      try {
+        micStreamRef.current.getTracks().forEach((track) => track.stop());
+      } catch {}
+      micStreamRef.current = null;
+    }
+    if (micSourceRef.current) {
+      try {
+        micSourceRef.current.disconnect();
+      } catch {}
+      micSourceRef.current = null;
     }
     setIsListening(false);
     stopVisualizer();
@@ -646,21 +708,38 @@ export function useAudioEngine(options?: UseAudioEngineOptions): UseAudioEngineR
     };
   }, [cleanupNodes, releaseStream]);
 
-  return {
-    isListening,
-    isSpeaking,
-    energyRef,
-    micSupported,
-    ttsSupported,
-    warmStream,
-    startRecording,
-    stopRecording,
-    cancelRecording,
-    playAudio,
-    speakFallback,
-    cancelPlayback,
-    error,
-    clearError: () => setError(null),
-    cleanupNodes,
-  };
+  return useMemo(
+    () => ({
+      isListening,
+      isSpeaking,
+      energyRef,
+      micSupported,
+      ttsSupported,
+      warmStream,
+      startRecording,
+      stopRecording,
+      cancelRecording,
+      playAudio,
+      speakFallback,
+      cancelPlayback,
+      error,
+      clearError: () => setError(null),
+      cleanupNodes,
+    }),
+    [
+      isListening,
+      isSpeaking,
+      micSupported,
+      ttsSupported,
+      warmStream,
+      startRecording,
+      stopRecording,
+      cancelRecording,
+      playAudio,
+      speakFallback,
+      cancelPlayback,
+      error,
+      cleanupNodes,
+    ]
+  );
 }

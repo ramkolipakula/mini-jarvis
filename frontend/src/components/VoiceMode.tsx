@@ -106,7 +106,7 @@ export function VoiceMode({
             </motion.p>
           )}
 
-          {lastAssistantMessage && (isSpeaking || state === 'speaking') && (
+          {lastAssistantMessage && state !== 'listening' && (
             <motion.p
               key="assistant-speaking"
               initial={{ opacity: 0, y: 8 }}
@@ -141,7 +141,7 @@ export function VoiceMode({
             </div>
           )}
 
-          {!transcript && !errorMessage && !(lastAssistantMessage && (isSpeaking || state === 'speaking')) && (
+          {!transcript && !errorMessage && !(lastAssistantMessage && state !== 'listening') && (
             <motion.p
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}

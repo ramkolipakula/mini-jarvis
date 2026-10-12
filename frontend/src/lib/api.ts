@@ -259,13 +259,22 @@ export interface TranscribeResponse {
   text: string;
 }
 
-/**
- * Upload voice audio to /api/jarvis/transcribe
- */
 export async function transcribeAudio(audioBlob: Blob): Promise<TranscribeResponse> {
   const url = getApiUrl('jarvis/transcribe');
   const formData = new FormData();
-  formData.append('file', audioBlob, 'web_recording.webm');
+
+  let filename = 'web_recording.webm';
+  if (audioBlob.type.includes('mp4')) {
+    filename = 'web_recording.mp4';
+  } else if (audioBlob.type.includes('wav')) {
+    filename = 'web_recording.wav';
+  } else if (audioBlob.type.includes('ogg')) {
+    filename = 'web_recording.ogg';
+  }
+
+  formData.append('file', audioBlob, filename);
+
+  console.log(`[VOICE DIAGNOSTIC] Uploading audio: ${filename} (${audioBlob.size} bytes, type="${audioBlob.type}") to ${url}`);
 
   const response = await fetchWithTimeout(
     url,
@@ -275,6 +284,8 @@ export async function transcribeAudio(audioBlob: Blob): Promise<TranscribeRespon
     },
     30000
   );
+
+  console.log(`[VOICE DIAGNOSTIC] Transcription HTTP status: ${response.status}`);
 
   if (!response.ok) {
     let rawDetail = 'Speech recognition failed on backend';
@@ -297,8 +308,10 @@ export async function transcribeAudio(audioBlob: Blob): Promise<TranscribeRespon
   }
 
   const data = await response.json();
+  const transcript = (data.text || '').trim();
+  console.log(`[VOICE DIAGNOSTIC] Raw transcription response text: "${transcript}"`);
   return {
-    text: (data.text || '').trim(),
+    text: transcript,
   };
 }
 

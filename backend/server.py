@@ -11,9 +11,18 @@ from config import GROQ_API_KEY
 
 app = FastAPI(title="JARVIS Backend API")
 
+# Allow origins from environment variable, specific Vercel app, or any *.vercel.app domain
+cors_env = os.getenv("CORS_ORIGINS", "")
+explicit_origins = [o.strip() for o in cors_env.split(",") if o.strip()] if cors_env else [
+    "https://mini-jarvis-ebon.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:3000",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://mini-jarvis-ebon.vercel.app"],
+    allow_origins=explicit_origins,
+    allow_origin_regex=r"^https://.*\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -126,23 +135,38 @@ async def transcribe_audio_api(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail="GROQ_API_KEY is not configured")
         
     client = Groq(api_key=GROQ_API_KEY)
-    temp_path = f"temp_web_{file.filename}"
     
-    with open(temp_path, "wb") as f:
-        f.write(await file.read())
+    content = await file.read()
+    if not content or len(content) < 100:
+        raise HTTPException(status_code=400, detail="Audio recording is empty or too short.")
         
+    import uuid
+    ext = os.path.splitext(file.filename or "")[1]
+    if not ext:
+        ext = ".webm"
+    temp_path = f"temp_web_{uuid.uuid4().hex}{ext}"
+    
     try:
+        with open(temp_path, "wb") as f:
+            f.write(content)
+            
         with open(temp_path, "rb") as f:
             transcription = client.audio.transcriptions.create(
               file=(temp_path, f.read()),
               model="whisper-large-v3",
+              language="en",
+              temperature=0.0,
+              prompt="Jarvis speech command.",
             )
         return {"text": transcription.text.strip()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if os.path.exists(temp_path):
-            os.remove(temp_path)
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     import uvicorn

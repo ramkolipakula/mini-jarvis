@@ -13,7 +13,7 @@ def generate_response(user_text, conversation_id=None):
     Integrates with Supabase for context retrieval and persistence.
     """
     if not GROQ_API_KEY:
-        return "Sir, my systems are currently offline. The Groq API key is missing."
+        return "My systems are currently offline. The Groq API key is missing."
         
     client = Groq(api_key=GROQ_API_KEY)
     
@@ -66,4 +66,4 @@ def generate_response(user_text, conversation_id=None):
         return jarvis_text
     except Exception as e:
         print(f"\n[Brain Error: {e}]")
-        return "I apologize sir, but I am experiencing cognitive difficulties at the moment."
+        return "I apologize, but I am experiencing cognitive difficulties at the moment."
